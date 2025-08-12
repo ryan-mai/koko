@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Koko</title>
+  <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+  <script src="https://unpkg.com/aframe-physics-system@4.0.1/dist/aframe-physics-system.min.js"></script>
+  <script>
+    // Ensure A-Frame is loaded before registering components
+    if (!window.AFRAME) {
+      console.error('A-Frame not loaded!');
+    }
+
+    function shuffle(array) {
+      let currentIndex = array.length;
+      while (currentIndex != 0) {
+        let randomIndex = Math.floor(Math.random() * currentIndex);
+        currentIndex--;
+        [array[currentIndex], array[randomIndex]] = [array[randomIndex], array[currentIndex]];
+      }
+      return array;
+    }
+
+    AFRAME.registerComponent('mover', {
+      schema: {
+        speed: {type: 'number', default: 10},
+        resetThreshold: {type: 'number', default: 50},
+        jumpDistance: {type: 'number', default: 200}
+      },
+      tick: function (time, delta) {
+        if (!this.el.object3D) return; // Safety check
+        var pos = this.el.object3D.position;
+        pos.z += (delta / 1000) * this.data.speed;
+        if (pos.z > this.data.resetThreshold) {
+          pos.z -= this.data.jumpDistance;
+          this.el.emit('reset');
+        }
+      }
+    });
+
+    AFRAME.registerComponent('car-spawner', {
+      init: function () {
+        this.spawn();
+        this.el.addEventListener('reset', this.spawn.bind(this));
+      },
+      spawn: function () {
+        try {
+          const obs = this.el.querySelectorAll('.car');
+          obs.forEach(o => o.parentNode.removeChild(o));
+
+          const sectionDist = 25;
+          const numSections = Math.floor(100 / sectionDist);
+          for (let s = 0; s < numSections; s++) {
+            const z = -50 + (s + 0.5) * sectionDist + (Math.random() - 0.5) * 10;
+            const allLanes = [0, 1, 2];
+            const numBlocked = Math.floor(Math.random() * 2) + 1; // 1 or 2
+            const blockedLanes = shuffle([...allLanes]).slice(0, numBlocked);
+            for (let l of blockedLanes) {
+              const x = -2 + l * 2;
+              const block = document.createElement('a-box');
+              block.classList.add('car');
+              block.setAttribute('position', `${x} 0.5 ${z}`);
+              block.setAttribute('scale', '1.8 1 1.8');
+              block.setAttribute('material', 'shader: flat; color: #A52A2A');
+              block.setAttribute('static-body', '');
+              this.el.appendChild(block);
+            }
+          }
+        } catch (e) {
+          console.error('Error in car-spawner:', e);
+        }
+      }
+    });
+
+    AFRAME.registerComponent('lane-controller', {
+      dependencies: ['dynamic-body'],
+      init: function () {
+        this.lanes = [-2, 0, 2];
+        this.current = 1;
+        this.el.object3D.position.set(0, 1, 0);
+        document.addEventListener('keydown', (e) => {
+          try {
+            if (e.key === 'a' || e.key === 'A' || e.key === 'ArrowLeft') {
+              if (this.current > 0) {
+                this.current--;
+                this.el.object3D.position.x = this.lanes[this.current];
+                if (this.el.body) {
+                  this.el.body.position.x = this.lanes[this.current];
+                }
+              }
+            } else if (e.key === 'd' || e.key === 'D' || e.key === 'ArrowRight') {
+              if (this.current < this.lanes.length - 1) {
+                this.current++;
+                this.el.object3D.position.x = this.lanes[this.current];
+                if (this.el.body) {
+                  this.el.body.position.x = this.lanes[this.current];
+                }
+              }
+            }
+            // 's' key is ignored
+          } catch (e) {
+            console.error('Error in lane-controller keydown:', e);
+          }
+        });
+      },
+      tick: function () {
+        try {
+          const playerX = this.el.object3D.position.x;
+          const cars = document.querySelectorAll('.car');
+          const tempVec = new THREE.Vector3();
+          for (let obs of cars) {
+            obs.object3D.getWorldPosition(tempVec);
+            if (Math.abs(tempVec.x - playerX) < 0.9 && Math.abs(tempVec.z) < 0.9) {
+              // Collision detected, reset to middle lane
+              this.current = 1;
+              this.el.object3D.position.set(this.lanes[this.current], 1, 0);
+              if (this.el.body) {
+                this.el.body.velocity.set(0, 0, 0);
+                this.el.body.position.set(this.lanes[this.current], 1, 0);
+              }
+            }
+          }
+        } catch (e) {
+          console.error('Error in lane-controller tick:', e);
+        }
+      }
+    });
+  </script>
+</head>
+<body>
+  <a-scene physics="driver: cannon; gravity: 0; fog: type: linear; color: #87CEEB; near: 0; far: 200">
+    <a-assets>
+      <img id="sky" src="assets/map/fire_sky.jpg">
+      <a-asset-item id="map" src="assets/map/scene.gltf"></a-asset-item>
+      <a-asset-item id="titan" src="assets/titan/scene.gltf"></a-asset-item>
+      <audio id="bg-music" src="assets/song.mp3"></audio>
+    </a-assets>
+
+    <a-sound src="#bg-music" autoplay="true" loop="true" volume="5"></a-sound>
+
+    <a-entity id="vr-menu">
+      <a-camera position="0 1.6 0" raycaster="far: 100">
+        <a-cursor fuse="true" fuse-timeout="500" color="white"></a-cursor>
+      </a-camera>
+      <a-plane position="0 1.6 -3" width="2" height="1.2" color="#222" opacity="0.9"></a-plane>
+      <a-text value="Koko" position="0 2.1 -2.99" align="center" color="#FFF" width="2"></a-text>
+      <a-box id="startBtn" position="0 1.4 -2.99" depth="0.1" height="0.3" width="1" color="#4CAF50"></a-box>
+      <!-- <a-text value="START" position="0 1.4 -2.89" align="center" color="#fff" width="1"></a-text> -->
+    </a-entity>
+
+    <a-entity id="game-entities" visible="false">
+      <a-sky src="#sky"></a-sky>
+      <a-entity gltf-model="#map" static-body position="0 0 -100" scale="50 50 50"></a-entity>
+      <a-entity gltf-model="#titan" static-body position="0 0 0"></a-entity>
+      <a-entity id="road1" position="0 0 -50" mover="speed: 10; resetThreshold: 50; jumpDistance: 200" car-spawner>
+        <a-box position="0 0 0" width="6" height="0.5" depth="100" material="shader: flat; color: #404040" static-body></a-box>
+        <a-box position="-1 0.01 0" scale="0.2 0.02 100" material="shader: flat; color: #FFFF00" static-body></a-box>
+        <a-box position="1 0.01 0" scale="0.2 0.02 100" material="shader: flat; color: #FFFF00" static-body></a-box>
+        <a-box position="-3.25 1 0" scale="0.5 2 100" material="shader: flat; color: #808080" static-body></a-box>
+        <a-box position="3.25 1 0" scale="0.5 2 100" material="shader: flat; color: #808080" static-body></a-box>
+      </a-entity>
+      <a-entity id="road2" position="0 0 -150" mover="speed: 10; resetThreshold: 50; jumpDistance: 200" car-spawner>
+        <a-box position="0 0 0" width="6" height="0.5" depth="100" material="shader: flat; color: #404040" static-body></a-box>
+        <a-box position="-1 0.01 0" scale="0.2 0.02 100" material="shader: flat; color: #FFFF00" static-body></a-box>
+        <a-box position="1 0.01 0" scale="0.2 0.02 100" material="shader: flat; color: #FFFF00" static-body></a-box>
+        <a-box position="-3.25 1 0" scale="0.5 2 100" material="shader: flat; color: #808080" static-body></a-box>
+        <a-box position="3.25 1 0" scale="0.5 2 100" material="shader: flat; color: #808080" static-body></a-box>
+      </a-entity>
+      <a-entity id="player" camera lane-controller dynamic-body="shape: sphere; sphereRadius: 0.3; mass: 1; linearDamping: 0.9">
+        <a-sphere radius="0.3" material="shader: flat; color: #FFD700" position="0 -0.7 -0.5"></a-sphere>
+      </a-entity>
+      <a-light type="ambient" color="#FFFFFF" intensity="0.3"></a-light>
+      <a-light type="directional" color="#FFFFFF" intensity="0.7" position="0 10 -5" decay="2" distance="50"></a-light>
+      <!-- Extra point light for titan only -->
+      <a-entity position="0 0 10">
+        <a-light type="point" color="#FFFFFF" intensity="3" distance="50"></a-light>
+      </a-entity>
+    </a-entity>
+
+    <script>
+      AFRAME.registerComponent('menu-listener', {
+        init: function () {
+          var startBtn = document.querySelector('#startBtn');
+          startBtn.addEventListener('click', function () {
+            document.querySelector('#vr-menu').setAttribute('visible', 'false');
+            document.querySelector('#game-entities').setAttribute('visible', 'true');
+          });
+        }
+      });
+      document.querySelector('a-scene').setAttribute('menu-listener', '');
+    </script>
+  </a-scene>
+</body>
+</html>

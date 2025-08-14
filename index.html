@@ -3,9 +3,39 @@
 <head>
   <title>Koko</title>
   <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
-  <script src="https://unpkg.com/aframe-physics-system@4.0.1/dist/aframe-physics-system.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/c-frame/aframe-extras@7.6.0/dist/aframe-extras.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.152.2/examples/js/loaders/DRACOLoader.js"></script>
   <script>
-    // Ensure A-Frame is loaded before registering components
+
+    let currentWave = 1;
+    let horsesPassed = 0;
+    let horseSpeed = 30;
+
+    function updateWaveLabel() {
+      const waveLabel = document.querySelector('#waveLabel');
+      if (waveLabel) {
+        waveLabel.setAttribute('value', `Wave ${currentWave}`);
+      }
+    }
+
+    function incrementWave() {
+      currentWave++;
+      horseSpeed += 10;
+      updateWaveLabel();
+
+      const mgrEl = document.querySelector('#horseManager');
+      const mgr = mgrEl && mgrEl.components && mgrEl.components['horse-manager'];
+      if (mgr) {
+        mgr.planEvents();
+        mgr.fillFromPlan();
+      }
+    }
+    if (window.THREE && THREE.DRACOLoader) {
+      THREE.DRACOLoader.setDecoderPath('https://www.gstatic.com/draco/v1/decoders/');
+    }
+  </script>
+
+  <script>
     if (!window.AFRAME) {
       console.error('A-Frame not loaded!');
     }
@@ -20,83 +50,242 @@
       return array;
     }
 
-    AFRAME.registerComponent('mover', {
+    AFRAME.registerComponent('horse-mover', {
       schema: {
-        speed: {type: 'number', default: 10},
-        resetThreshold: {type: 'number', default: 50},
-        jumpDistance: {type: 'number', default: 200}
+
+        extraSpeed: {type: 'number', default: 0}
+      },
+      init: function () {
+
+        this.endZ = 0;
       },
       tick: function (time, delta) {
-        if (!this.el.object3D) return; // Safety check
-        var pos = this.el.object3D.position;
-        pos.z += (delta / 1000) * this.data.speed;
-        if (pos.z > this.data.resetThreshold) {
-          pos.z -= this.data.jumpDistance;
-          this.el.emit('reset');
+        if (!this.el.object3D) return;
+        const speedNow = (window.horseSpeed || 30) + this.data.extraSpeed;
+        const pos = this.el.object3D.position;
+        pos.z += (delta / 1000) * speedNow;
+
+        if (pos.z >= this.endZ) {
+          this.el.emit('needs-respawn');
         }
       }
     });
 
-    AFRAME.registerComponent('car-spawner', {
-      init: function () {
-        this.spawn();
-        this.el.addEventListener('reset', this.spawn.bind(this));
+    AFRAME.registerComponent('horse-manager', {
+      schema: {
+        poolSize: {type: 'number', default: 6},
+        startZ: {type: 'number', default: -200},
+        planCount: {type: 'number', default: 40},
+        maxActive: {type: 'number', default: 10},
+        zJitter: {type: 'number', default: 20},
+        minGapZ: {type: 'number', default: 50}
       },
-      spawn: function () {
-        try {
-          const obs = this.el.querySelectorAll('.car');
-          obs.forEach(o => o.parentNode.removeChild(o));
+      init: function () {
+        this.lanes = [-2, 0, 2];
+        this.pool = [];
+        this.free = []; 
+        this.events = []; 
+        this.nextEventIdx = 0;
+        this.replanCounter = 0;
 
-          const sectionDist = 25;
-          const numSections = Math.floor(100 / sectionDist);
-          for (let s = 0; s < numSections; s++) {
-            const z = -50 + (s + 0.5) * sectionDist + (Math.random() - 0.5) * 10;
-            const allLanes = [0, 1, 2];
-            const numBlocked = Math.floor(Math.random() * 2) + 1; // 1 or 2
-            const blockedLanes = shuffle([...allLanes]).slice(0, numBlocked);
-            for (let l of blockedLanes) {
-              const x = -2 + l * 2;
-              const block = document.createElement('a-box');
-              block.classList.add('car');
-              block.setAttribute('position', `${x} 0.5 ${z}`);
-              block.setAttribute('scale', '1.8 1 1.8');
-              block.setAttribute('material', 'shader: flat; color: #A52A2A');
-              block.setAttribute('static-body', '');
-              this.el.appendChild(block);
-            }
-          }
-        } catch (e) {
-          console.error('Error in car-spawner:', e);
+        for (let i = 0; i < this.data.poolSize; i++) {
+          const horse = document.createElement('a-entity');
+          horse.classList.add('car');
+          horse.setAttribute('gltf-model', 'assets/obstacles/Horse_Running.glb');
+          horse.setAttribute('scale', '0.04 0.04 0.04');
+          horse.setAttribute('position', `0 0.5 ${this.data.startZ}`);
+          horse.setAttribute('animation-mixer', 'clip: *; timeScale: 2');
+          horse.setAttribute('horse-mover', '');
+          horse.setAttribute('horse-id', (i+1));
+          horse.addEventListener('needs-respawn', () => this.recycleHorse(horse));
+          this.el.appendChild(horse);
+          this.pool.push(horse);
+          this.free.push(i);
         }
+        this.planEvents();
+        this.fillFromPlan();
+      },
+      reset: function () {
+
+        this.free = [];
+        for (let i = 0; i < this.pool.length; i++) {
+          const h = this.pool[i];
+          h.object3D.position.set(0, 0.5, this.data.startZ);
+          h.object3D.visible = true;
+          this.free.push(i);
+        }
+        this.planEvents();
+        this.fillFromPlan();
+
+      },
+      getPlayerLane: function () {
+        try {
+          const player = document.querySelector('#player');
+          const x = player && player.object3D ? player.object3D.position.x : 0;
+          let idx = 0, bestDist = Infinity;
+          for (let i = 0; i < this.lanes.length; i++) {
+            const d = Math.abs(this.lanes[i] - x);
+            if (d < bestDist) { bestDist = d; idx = i; }
+          }
+          return idx;
+        } catch (e) { return 1; }
+      },
+      currentMinGap: function () {
+
+        return (window.horseSpeed || 30) >= 100 || (window.currentWave || 1) >= 3 ? 25 : 75;
+      },
+      planEvents: function () {
+        this.events = [];
+        this.nextEventIdx = 0;
+        const gap = this.currentMinGap();
+        const jitter = this.data.zJitter || 0;
+        const startZ = this.data.startZ;
+        const count = this.data.planCount;
+        const playerLane = this.getPlayerLane();
+        const wave = window.currentWave || 1;
+
+        const twoLaneProb = Math.min(0.35 + 0.12 * (wave - 1), 0.8);
+
+        const repeatLaneProb = Math.min(0.25 + 0.1 * (wave - 1), 0.75);
+        let z = startZ;
+
+        const player = document.querySelector('#player');
+        const endZ = (player && player.object3D) ? player.object3D.position.z : 0;
+        let lastChosen = null;
+        for (let i = 0; i < count && z < endZ - 5; i++) {
+
+          let lanesToUse = [];
+          const useTwo = Math.random() < twoLaneProb;
+          if (useTwo) {
+
+            lanesToUse.push(playerLane);
+
+            const others = [0,1,2].filter(L => L !== playerLane);
+
+            const prefer = playerLane === 1 ? others[0] : 1;
+            const second = (Math.random() < 0.6) ? prefer : others[Math.floor(Math.random()*others.length)];
+            if (!lanesToUse.includes(second)) lanesToUse.push(second);
+
+            lanesToUse = lanesToUse.slice(0,2);
+
+            if (Math.random() < 0.5) lanesToUse.reverse();
+          } else {
+
+            const pickPlayer = Math.random() < 0.65;
+            let lane = pickPlayer ? playerLane : [0,1,2].filter(L=>L!==playerLane)[Math.floor(Math.random()*2)];
+
+            if (lastChosen !== null && Math.random() < repeatLaneProb) lane = lastChosen;
+            lanesToUse = [lane];
+            lastChosen = lane;
+          }
+          this.events.push({ z, lanes: lanesToUse });
+
+          z += gap + (jitter > 0 ? Math.random() * jitter : 0);
+        }
+      },
+      fillFromPlan: function () {
+
+        let active = this.pool.length - this.free.length;
+
+        const freeSet = new Set(this.free);
+        const activeZs = this.pool
+          .map((h, i) => (!freeSet.has(i) ? h.object3D.position.z : null))
+          .filter(z => z !== null);
+        const minGap = this.data.minGapZ || 50;
+        const computeSpacedZ = (baseZ) => {
+          let z = baseZ;
+
+          let safety = (activeZs.length || 0) + 5;
+          while (safety-- > 0) {
+            let tooClose = false;
+            for (let i = 0; i < activeZs.length; i++) {
+              const oz = activeZs[i];
+              if (Math.abs(z - oz) < minGap) {
+
+                z = Math.min(z, oz - minGap);
+                tooClose = true;
+              }
+            }
+            if (!tooClose) break;
+          }
+          return z;
+        };
+        while (this.nextEventIdx < this.events.length && this.free.length > 0 && active < this.data.maxActive) {
+          const ev = this.events[this.nextEventIdx++];
+          const playerLane = this.getPlayerLane();
+
+          const orderedLanes = [...ev.lanes].sort((a,b)=> (a===playerLane? -1:0) - (b===playerLane? -1:0));
+          let remaining = [];
+          for (const laneIdx of orderedLanes) {
+            if (this.free.length === 0 || active >= this.data.maxActive) {
+              remaining.push(laneIdx);
+              continue;
+            }
+            const horseIdx = this.free.pop();
+            const horse = this.pool[horseIdx];
+
+            const wave = window.currentWave || 1;
+            const extra = (Math.random() * 8 - 4) + (wave - 1) * 1; 
+            const timeScale = Math.max(1.2, 1.6 + Math.random() * 0.8 + (wave - 1) * 0.05);
+            horse.setAttribute('horse-mover', `extraSpeed: ${extra.toFixed(2)}`);
+            horse.setAttribute('animation-mixer', `clip: *; loop: repeat; timeScale: ${timeScale.toFixed(2)}`);
+
+            const spawnZ = computeSpacedZ(this.data.startZ);
+            horse.object3D.position.set(this.lanes[laneIdx], 0.5, spawnZ);
+            horse.setAttribute('horse-lane', laneIdx);
+
+            activeZs.push(spawnZ);
+            active++;
+          }
+
+          if (remaining.length > 0) {
+            this.events.splice(this.nextEventIdx, 0, { z: ev.z, lanes: remaining });
+          }
+        }
+      },
+      recycleHorse: function (horse) {
+
+        try {
+          window.horsesPassed = (window.horsesPassed || 0) + 1;
+          if (window.horsesPassed % 15 === 0) {
+            window.incrementWave();
+          }
+          this.replanCounter = (this.replanCounter || 0) + 1;
+
+          const idx = this.pool.indexOf(horse);
+          if (idx !== -1) this.free.push(idx);
+
+          horse.object3D.position.set(0, 0.5, this.data.startZ);
+
+          if (this.nextEventIdx >= this.events.length || this.replanCounter % 12 === 0) {
+            this.planEvents();
+          }
+          this.fillFromPlan();
+        } catch (e) { console.error('recycleHorse error', e); }
       }
     });
 
     AFRAME.registerComponent('lane-controller', {
-      dependencies: ['dynamic-body'],
       init: function () {
         this.lanes = [-2, 0, 2];
         this.current = 1;
         this.el.object3D.position.set(0, 1, 0);
+
+        this.cars = null;
+        this.lastCarsRefresh = 0;
         document.addEventListener('keydown', (e) => {
           try {
             if (e.key === 'a' || e.key === 'A' || e.key === 'ArrowLeft') {
               if (this.current > 0) {
                 this.current--;
                 this.el.object3D.position.x = this.lanes[this.current];
-                if (this.el.body) {
-                  this.el.body.position.x = this.lanes[this.current];
-                }
               }
             } else if (e.key === 'd' || e.key === 'D' || e.key === 'ArrowRight') {
               if (this.current < this.lanes.length - 1) {
                 this.current++;
                 this.el.object3D.position.x = this.lanes[this.current];
-                if (this.el.body) {
-                  this.el.body.position.x = this.lanes[this.current];
-                }
               }
             }
-            // 's' key is ignored
           } catch (e) {
             console.error('Error in lane-controller keydown:', e);
           }
@@ -105,18 +294,21 @@
       tick: function () {
         try {
           const playerX = this.el.object3D.position.x;
-          const cars = document.querySelectorAll('.car');
-          const tempVec = new THREE.Vector3();
-          for (let obs of cars) {
-            obs.object3D.getWorldPosition(tempVec);
-            if (Math.abs(tempVec.x - playerX) < 0.9 && Math.abs(tempVec.z) < 0.9) {
-              // Collision detected, reset to middle lane
+
+          const time = performance.now();
+          if (!this.cars || this.cars.length === 0 || (time - this.lastCarsRefresh) > 2000) {
+            this.cars = Array.from(document.querySelectorAll('.car'));
+            this.lastCarsRefresh = time;
+          }
+          for (let obs of this.cars) {
+            const pos = obs.object3D.position; 
+            if (Math.abs(pos.x - playerX) < 0.9 && Math.abs(pos.z) < 0.9) {
+
+              let laneIndex = this.lanes.indexOf(Math.round(pos.x));
+              let laneName = laneIndex === 0 ? 'left' : laneIndex === 1 ? 'center' : laneIndex === 2 ? 'right' : 'unknown';
+              console.log(`Horse touched the player in lane: ${laneName} (x=${pos.x})`);
               this.current = 1;
               this.el.object3D.position.set(this.lanes[this.current], 1, 0);
-              if (this.el.body) {
-                this.el.body.velocity.set(0, 0, 0);
-                this.el.body.position.set(this.lanes[this.current], 1, 0);
-              }
             }
           }
         } catch (e) {
@@ -124,53 +316,60 @@
         }
       }
     });
+
   </script>
 </head>
 <body>
-  <a-scene physics="driver: cannon; gravity: 0; fog: type: linear; color: #87CEEB; near: 0; far: 200">
+  <a-scene stats renderer="antialias: false; precision: mediump; powerPreference: high-performance" fog="type: linear; color: #87CEEB; near: 0; far: 200">
     <a-assets>
       <img id="sky" src="assets/map/fire_sky.jpg">
       <a-asset-item id="map" src="assets/map/scene.gltf"></a-asset-item>
-      <a-asset-item id="titan" src="assets/titan/scene.gltf"></a-asset-item>
+      <a-asset-item id="titan_run" src="assets/titan/run.glb"></a-asset-item>
       <audio id="bg-music" src="assets/song.mp3"></audio>
     </a-assets>
 
-    <a-sound src="#bg-music" autoplay="true" loop="true" volume="5"></a-sound>
+    <a-sound src="#bg-music" autoplay="true" loop="true" volume="0.7"></a-sound>
 
     <a-entity id="vr-menu">
-      <a-camera position="0 1.6 0" raycaster="far: 100">
+      <a-camera id="menuCam" position="0 1.6 0" raycaster="far: 100" camera>
         <a-cursor fuse="true" fuse-timeout="500" color="white"></a-cursor>
       </a-camera>
       <a-plane position="0 1.6 -3" width="2" height="1.2" color="#222" opacity="0.9"></a-plane>
       <a-text value="Koko" position="0 2.1 -2.99" align="center" color="#FFF" width="2"></a-text>
       <a-box id="startBtn" position="0 1.4 -2.99" depth="0.1" height="0.3" width="1" color="#4CAF50"></a-box>
-      <!-- <a-text value="START" position="0 1.4 -2.89" align="center" color="#fff" width="1"></a-text> -->
+      <a-text value="START" position="0 1.4 -2.89" align="center" color="#fff" width="1"></a-text>
     </a-entity>
 
     <a-entity id="game-entities" visible="false">
       <a-sky src="#sky"></a-sky>
-      <a-entity gltf-model="#map" static-body position="0 0 -100" scale="50 50 50"></a-entity>
-      <a-entity gltf-model="#titan" static-body position="0 0 0"></a-entity>
-      <a-entity id="road1" position="0 0 -50" mover="speed: 10; resetThreshold: 50; jumpDistance: 200" car-spawner>
-        <a-box position="0 0 0" width="6" height="0.5" depth="100" material="shader: flat; color: #404040" static-body></a-box>
-        <a-box position="-1 0.01 0" scale="0.2 0.02 100" material="shader: flat; color: #FFFF00" static-body></a-box>
-        <a-box position="1 0.01 0" scale="0.2 0.02 100" material="shader: flat; color: #FFFF00" static-body></a-box>
-        <a-box position="-3.25 1 0" scale="0.5 2 100" material="shader: flat; color: #808080" static-body></a-box>
-        <a-box position="3.25 1 0" scale="0.5 2 100" material="shader: flat; color: #808080" static-body></a-box>
+  <a-entity gltf-model="#map" position="0 0 -100" scale="50 50 50"></a-entity>
+
+  <a-plane position="0 5 -7.99" width="3" height="0.5" color="#c1121f" opacity="0.9"></a-plane>
+  <a-text id="waveLabel" value="Wave 1" position="0 4.94 -7.89" align="center" color="#fff" width="4" height="2"></a-text>
+
+  <a-entity id="road1" position="0 0 -50">
+    <a-box position="0 0 0" width="6" height="0.5" depth="100" material="shader: flat; color: #404040"></a-box>
+    <a-box position="-1 0.01 0" scale="0.2 0.02 100" material="shader: flat; color: #FFFF00"></a-box>
+    <a-box position="1 0.01 0" scale="0.2 0.02 100" material="shader: flat; color: #FFFF00"></a-box>
+    <a-box position="-3.25 1 0" scale="0.5 2 100" material="shader: flat; color: #808080"></a-box>
+    <a-box position="3.25 1 0" scale="0.5 2 100" material="shader: flat; color: #808080"></a-box>
       </a-entity>
-      <a-entity id="road2" position="0 0 -150" mover="speed: 10; resetThreshold: 50; jumpDistance: 200" car-spawner>
-        <a-box position="0 0 0" width="6" height="0.5" depth="100" material="shader: flat; color: #404040" static-body></a-box>
-        <a-box position="-1 0.01 0" scale="0.2 0.02 100" material="shader: flat; color: #FFFF00" static-body></a-box>
-        <a-box position="1 0.01 0" scale="0.2 0.02 100" material="shader: flat; color: #FFFF00" static-body></a-box>
-        <a-box position="-3.25 1 0" scale="0.5 2 100" material="shader: flat; color: #808080" static-body></a-box>
-        <a-box position="3.25 1 0" scale="0.5 2 100" material="shader: flat; color: #808080" static-body></a-box>
+  <a-entity id="road2" position="0 0 -150">
+    <a-box position="0 0 0" width="6" height="0.5" depth="100" material="shader: flat; color: #404040"></a-box>
+    <a-box position="-1 0.01 0" scale="0.2 0.02 100" material="shader: flat; color: #FFFF00"></a-box>
+    <a-box position="1 0.01 0" scale="0.2 0.02 100" material="shader: flat; color: #FFFF00"></a-box>
+    <a-box position="-3.25 1 0" scale="0.5 2 100" material="shader: flat; color: #808080"></a-box>
+    <a-box position="3.25 1 0" scale="0.5 2 100" material="shader: flat; color: #808080"></a-box>
       </a-entity>
-      <a-entity id="player" camera lane-controller dynamic-body="shape: sphere; sphereRadius: 0.3; mass: 1; linearDamping: 0.9">
-        <a-sphere radius="0.3" material="shader: flat; color: #FFD700" position="0 -0.7 -0.5"></a-sphere>
-      </a-entity>
+
+  <a-entity id="horseManager" horse-manager="startZ: -120; poolSize: 3; planCount: 12; maxActive: 3; zJitter: 20; minGapZ: 50"></a-entity>
+
+  <a-entity id="player" lane-controller gltf-model="#titan_run" animation-mixer scale="0.5 0.5 0.5">
+      <a-camera id="playerCam" position="0 4.5 1.5" wasd-controls-enabled="false" look-controls-enabled="false"></a-camera>
+    </a-entity>
       <a-light type="ambient" color="#FFFFFF" intensity="0.3"></a-light>
-      <a-light type="directional" color="#FFFFFF" intensity="0.7" position="0 10 -5" decay="2" distance="50"></a-light>
-      <!-- Extra point light for titan only -->
+      <a-light type="directional" color="#FFFFFF" intensity="2" position="0 10 -5" decay="2" distance="50"></a-light>
+
       <a-entity position="0 0 10">
         <a-light type="point" color="#FFFFFF" intensity="3" distance="50"></a-light>
       </a-entity>
@@ -180,13 +379,36 @@
       AFRAME.registerComponent('menu-listener', {
         init: function () {
           var startBtn = document.querySelector('#startBtn');
+          var menuCam = document.querySelector('#menuCam');
+          var playerCam = document.querySelector('#playerCam');
+          var vrMenu = document.querySelector('#vr-menu');
+          var gameEntities = document.querySelector('#game-entities');
+
+          menuCam.setAttribute('camera', 'active', true);
+          playerCam.removeAttribute('camera');
           startBtn.addEventListener('click', function () {
-            document.querySelector('#vr-menu').setAttribute('visible', 'false');
-            document.querySelector('#game-entities').setAttribute('visible', 'true');
+            vrMenu.setAttribute('visible', 'false');
+            gameEntities.setAttribute('visible', 'true');
+
+            menuCam.removeAttribute('camera');
+            playerCam.setAttribute('camera', 'active', true);
+
+            const mgrEl = document.querySelector('#horseManager');
+            const mgr = mgrEl && mgrEl.components && mgrEl.components['horse-manager'];
+            if (mgr) {
+
+              window.horsesPassed = 0;
+              window.currentWave = 1;
+              window.horseSpeed = 30;
+              const waveLabel = document.querySelector('#waveLabel');
+              if (waveLabel) waveLabel.setAttribute('value', 'Wave 1');
+              mgr.reset();
+            }
           });
         }
       });
       document.querySelector('a-scene').setAttribute('menu-listener', '');
+
     </script>
   </a-scene>
 </body>

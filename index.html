@@ -35,7 +35,7 @@
       <audio id="bg-music" src="assets/song.mp3"></audio>
     </a-assets>
   <a-entity id="bgMusic" geometry="primitive: plane" material="color: blue"
-          position="0 0 0" sound="src: assets/song.mp3; autoplay: true; volume: 1.2"></a-entity>
+          position="0 0 0" sound="src: #bg-music; autoplay: false; loop: true; volume: 1"></a-entity>
 
     <a-sky id="#sky"></a-sky>
     <a-entity id="vr-menu">
@@ -130,6 +130,29 @@
         console.warn('[diagnostic] error in window load event:', e);
       }
     });
+  </script>
+  <script>
+    // Start background audio on first user gesture so browsers won't block playback.
+    (function() {
+      function startMusic() {
+        const bgEntity = document.getElementById('bgMusic');
+        const audioEl = document.getElementById('bg-music');
+        // Try A-Frame sound component first
+        try {
+          if (bgEntity && bgEntity.components && bgEntity.components.sound) {
+            bgEntity.components.sound.playSound();
+          }
+        } catch (e) { /* ignore */ }
+        // Fallback to HTMLAudioElement
+        try {
+          if (audioEl) audioEl.play().catch(()=>{});
+        } catch(_){}
+        window.removeEventListener('click', startMusic);
+        window.removeEventListener('touchstart', startMusic);
+      }
+      window.addEventListener('click', startMusic, { once: true });
+      window.addEventListener('touchstart', startMusic, { once: true });
+    })();
   </script>
 </body>
 </html>

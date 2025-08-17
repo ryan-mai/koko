@@ -4,551 +4,71 @@
   <title>Koko VR</title>
   <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
   <script src="https://cdn.jsdelivr.net/gh/c-frame/aframe-extras@7.6.0/dist/aframe-extras.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/three@0.152.2/examples/js/loaders/DRACOLoader.js"></script>
-  <script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.164.0/examples/js/loaders/DRACOLoader.js"></script>
+  <script src="https://unpkg.com/aframe-troika-text/dist/aframe-troika-text.min.js"></script>
+  <script src="js/globals.js"></script>
+  <script src="js/components/horse-mover.js"></script>
+  <script src="js/components/horse-manager.js"></script>
+  <script src="js/components/lane-controller.js"></script>
+  <script src="js/components/intro-director.js"></script>
+  <script src="js/components/finale-director.js"></script>
 
-  let currentWave = 1;
-  let horsesPassed = 0; // total across all waves (for stats)
-  let horseSpeed = 30;
-  // Mirror to window for global access (A-Frame components use window.*)
-  window.currentWave = currentWave;
-  window.horsesPassed = horsesPassed;
-  window.horseSpeed = horseSpeed;
-
-  // New per-wave tracking
-  let horsesPassedInWave = 0;   // how many have finished this wave
-  let horsesSpawnedInWave = 0;  // how many spawned this wave
-  let waveTransitioning = false; // block spawns during 2s delay
-
-  // Quota function: Wave 1 => 5, Wave 2 => 6, Wave 3 => 7, etc.
-  function waveQuota(w) { return 4 + (w || window.currentWave); }
-  window.waveQuota = waveQuota;
-
-  function updateWaveLabel() {
-      const waveLabel = document.querySelector('#waveLabel');
-      if (waveLabel) {
-    waveLabel.setAttribute('value', `Wave ${window.currentWave}`);
-      }
-      if (window.updateHorsesLeftLabel) window.updateHorsesLeftLabel();
-    }
-
-    function updateHorsesLeftLabel() {
-      const txt = document.querySelector('#horsesLeftLabel');
-      if (!txt) return;
-      const quota = (window.waveQuota ? window.waveQuota(window.currentWave) : 5);
-      const passedWave = window.horsesPassedInWave || 0;
-      const left = Math.max(0, quota - passedWave);
-      txt.setAttribute('value', `${left} to next wave`);
-    }
-    window.updateHorsesLeftLabel = updateHorsesLeftLabel;
-
-    function incrementWave() {
-      // Called after the 2s delay
-      window.currentWave = (window.currentWave || 1) + 1;
-      window.horseSpeed = (window.horseSpeed || 30) + 5;
-
-      // Reset per-wave counters for the new wave
-      window.horsesPassedInWave = 0;
-      window.horsesSpawnedInWave = 0;
-
-  updateWaveLabel();
-      if (window.updateHorsesLeftLabel) window.updateHorsesLeftLabel();
-
-  const mgrEl = document.querySelector('#horseManager');
-      const mgr = mgrEl && mgrEl.components && mgrEl.components['horse-manager'];
-      if (mgr) {
-        mgr.planEvents();
-        mgr.fillFromPlan();
-      }
-  console.log(`[Game] Wave advanced -> Wave ${window.currentWave}, quota=${waveQuota(window.currentWave)}, baseSpeed=${window.horseSpeed}`);
-    }
-    if (window.THREE && THREE.DRACOLoader) {
-      THREE.DRACOLoader.setDecoderPath('https://www.gstatic.com/draco/v1/decoders/');
-    }
-  </script>
-
-  <script>
-    if (!window.AFRAME) {
-      console.error('A-Frame not loaded!');
-    }
-
-    function shuffle(array) {
-      let currentIndex = array.length;
-      while (currentIndex != 0) {
-        let randomIndex = Math.floor(Math.random() * currentIndex);
-        currentIndex--;
-        [array[currentIndex], array[randomIndex]] = [array[randomIndex], array[currentIndex]];
-      }
-      return array;
-    }
-
-    AFRAME.registerComponent('horse-mover', {
-      schema: {
-  extraSpeed: {type: 'number', default: 0},
-  active: {type: 'boolean', default: false}
-      },
-      init: function () {
-        this.endZ = 0;
-      },
-      tick: function (time, delta) {
-  if (!this.el.object3D) return;
-  if (!this.data.active) return; // don't move until spawned
-        const speedNow = (window.horseSpeed || 30) + this.data.extraSpeed;
-        const pos = this.el.object3D.position;
-        pos.z += (delta / 1000) * speedNow;
-
-        if (pos.z >= this.endZ) {
-          this.el.emit('needs-respawn');
-        }
-      }
-    });
-
-    AFRAME.registerComponent('horse-manager', {
-      schema: {
-        poolSize: {type: 'number', default: 6},
-        startZ: {type: 'number', default: -200},
-        planCount: {type: 'number', default: 40},
-        maxActive: {type: 'number', default: 10},
-        zJitter: {type: 'number', default: 20},
-  minGapZ: {type: 'number', default: 50}
-      },
-      init: function () {
-        this.lanes = [-2, 0, 2];
-        this.pool = [];
-        this.free = []; 
-        this.events = []; 
-        this.nextEventIdx = 0;
-        this.replanCounter = 0;
-  this.waveDoneTriggered = false; // prevent multiple transitions
-
-        for (let i = 0; i < this.data.poolSize; i++) {
-          const horse = document.createElement('a-entity');
-          horse.classList.add('car');
-          horse.setAttribute('gltf-model', 'assets/obstacles/Horse_Running.glb');
-          horse.setAttribute('scale', '0.04 0.04 0.04');
-          horse.setAttribute('position', `0 0.5 ${this.data.startZ}`);
-          horse.setAttribute('animation-mixer', 'clip: *; timeScale: 2');
-          // create inactive and hidden until spawned
-          horse.setAttribute('horse-mover', 'active: false; extraSpeed: 0');
-          horse.object3D.visible = false;
-          horse.setAttribute('horse-id', (i+1));
-          horse.addEventListener('needs-respawn', () => this.recycleHorse(horse));
-          this.el.appendChild(horse);
-          this.pool.push(horse);
-          this.free.push(i);
-        }
-        console.log('[HorseManager] init complete. poolSize=', this.data.poolSize);
-        this.planEvents();
-        this.fillFromPlan();
-      },
-      reset: function () {
-
-        this.free = [];
-        for (let i = 0; i < this.pool.length; i++) {
-          const h = this.pool[i];
-          h.object3D.position.set(0, 0.5, this.data.startZ);
-          h.object3D.visible = false;
-          h.setAttribute('horse-mover', 'active: false; extraSpeed: 0');
-          this.free.push(i);
-        }
-  this.waveDoneTriggered = false;
-  this.planEvents();
-  this.fillFromPlan();
-
-      },
-      getPlayerLane: function () {
-        try {
-          const player = document.querySelector('#player');
-          const x = player && player.object3D ? player.object3D.position.x : 0;
-          let idx = 0, bestDist = Infinity;
-          for (let i = 0; i < this.lanes.length; i++) {
-            const d = Math.abs(this.lanes[i] - x);
-            if (d < bestDist) { bestDist = d; idx = i; }
-          }
-          return idx;
-        } catch (e) { return 1; }
-      },
-      currentMinGap: function () {
-        return (window.horseSpeed || 30) >= 100 || (window.currentWave || 1) >= 3 ? 25 : 75;
-      },
-      planEvents: function () {
-  this.events = [];
-        this.nextEventIdx = 0;
-        const gap = this.currentMinGap();
-        const jitter = this.data.zJitter || 0;
-        const startZ = this.data.startZ;
-        // plan a generous number; we'll cap by per-wave spawn quota in fillFromPlan
-        const count = this.data.planCount;
-        const playerLane = this.getPlayerLane();
-        const wave = window.currentWave || 1;
-
-        const twoLaneProb = Math.min(0.35 + 0.12 * (wave - 1), 0.8);
-        const repeatLaneProb = Math.min(0.25 + 0.1 * (wave - 1), 0.75);
-        
-        let z = startZ;
-
-        const player = document.querySelector('#player');
-        const endZ = (player && player.object3D) ? player.object3D.position.z : 0;
-        let lastChosen = null;
-        for (let i = 0; i < count && z < endZ - 5; i++) {
-
-          let lanesToUse = [];
-          const useTwo = Math.random() < twoLaneProb;
-          if (useTwo) {
-
-            lanesToUse.push(playerLane);
-
-            const others = [0,1,2].filter(L => L !== playerLane);
-
-            const prefer = playerLane === 1 ? others[0] : 1;
-            const second = (Math.random() < 0.6) ? prefer : others[Math.floor(Math.random()*others.length)];
-            if (!lanesToUse.includes(second)) lanesToUse.push(second);
-
-            lanesToUse = lanesToUse.slice(0,2);
-
-            if (Math.random() < 0.5) lanesToUse.reverse();
-          } else {
-
-            const pickPlayer = Math.random() < 0.65;
-            let lane = pickPlayer ? playerLane : [0,1,2].filter(L=>L!==playerLane)[Math.floor(Math.random()*2)];
-
-            if (lastChosen !== null && Math.random() < repeatLaneProb) lane = lastChosen;
-            lanesToUse = [lane];
-            lastChosen = lane;
-          }
-          this.events.push({ z, lanes: lanesToUse });
-
-          z += gap + (jitter > 0 ? Math.random() * jitter : 0);
-        }
-      },
-  fillFromPlan: function () {
-        let active = this.pool.length - this.free.length;
-
-        const freeSet = new Set(this.free);
-        const activeZs = this.pool
-          .map((h, i) => (!freeSet.has(i) ? h.object3D.position.z : null))
-          .filter(z => z !== null);
-        const minGap = this.data.minGapZ || 50;
-        const computeSpacedZ = (baseZ) => {
-          let z = baseZ;
-
-          let safety = (activeZs.length || 0) + 5;
-          while (safety-- > 0) {
-            let tooClose = false;
-            for (let i = 0; i < activeZs.length; i++) {
-              const oz = activeZs[i];
-              if (Math.abs(z - oz) < minGap) {
-
-                z = Math.min(z, oz - minGap);
-                tooClose = true;
-              }
-            }
-            if (!tooClose) break;
-          }
-          return z;
-        };
-        // Enforce per-wave quota: stop spawning when spawned >= quota
-        const quota = (window.waveQuota ? window.waveQuota(window.currentWave) : 5);
-        while (this.nextEventIdx < this.events.length && this.free.length > 0 && active < this.data.maxActive) {
-          if (window.waveTransitioning) {
-            console.log('[Spawn] Paused: waveTransitioning is true');
-            break; // stop during delay
-          }
-          if ((window.horsesSpawnedInWave || 0) >= quota) {
-            console.log(`[Spawn] Quota reached for Wave ${window.currentWave}: spawned=${window.horsesSpawnedInWave}/${quota}`);
-            break;
-          }
-          const ev = this.events[this.nextEventIdx++];
-          const playerLane = this.getPlayerLane();
-
-          const orderedLanes = [...ev.lanes].sort((a,b)=> (a===playerLane? -1:0) - (b===playerLane? -1:0));
-          let remaining = [];
-          for (const laneIdx of orderedLanes) {
-            if (this.free.length === 0 || active >= this.data.maxActive) {
-              remaining.push(laneIdx);
-              continue;
-            }
-            // Respect per-wave spawn quota
-            if ((window.horsesSpawnedInWave || 0) >= quota) {
-              remaining.push(laneIdx);
-              continue;
-            }
-            const horseIdx = this.free.pop();
-            const horse = this.pool[horseIdx];
-
-            const wave = window.currentWave || 1;
-            const extra = (Math.random() * 6.9 - 4) + (wave - 1); 
-            horse.setAttribute('horse-mover', `active: true; extraSpeed: ${extra.toFixed(2)}`);
-            horse.setAttribute('animation-mixer', `clip: *; loop: repeat; timeScale: 2`);
-
-            const spawnZ = computeSpacedZ(this.data.startZ);
-            horse.object3D.position.set(this.lanes[laneIdx], 0.5, spawnZ);
-            horse.setAttribute('horse-lane', laneIdx);
-            horse.object3D.visible = true;
-
-            const speedNow = (window.horseSpeed || 30) + parseFloat(extra.toFixed(2));
-            console.log(`[Spawn] Wave ${window.currentWave} | spawned ${window.horsesSpawnedInWave + 1}/${quota} | lane=${laneIdx} z=${spawnZ.toFixed(1)} | speed=${speedNow.toFixed(1)} (base=${window.horseSpeed} extra=${extra.toFixed(2)})`);
-
-            activeZs.push(spawnZ);
-            active++;
-            window.horsesSpawnedInWave = (window.horsesSpawnedInWave || 0) + 1;
-          }
-
-          if (remaining.length > 0) {
-            this.events.splice(this.nextEventIdx, 0, { z: ev.z, lanes: remaining });
-          }
-        }
-      },
-      recycleHorse: function (horse) {
-        try {
-          window.horsesPassed = (window.horsesPassed || 0) + 1; // global stat
-          window.horsesPassedInWave = (window.horsesPassedInWave || 0) + 1;
-
-          const quota = (window.waveQuota ? window.waveQuota(window.currentWave) : 5);
-          const finishedWave = (window.horsesPassedInWave >= quota);
-          if (window.updateHorsesLeftLabel) window.updateHorsesLeftLabel();
-          this.replanCounter = (this.replanCounter || 0) + 1;
-
-          const idx = this.pool.indexOf(horse);
-          if (idx !== -1) this.free.push(idx);
-
-          // Deactivate and hide until explicitly spawned again
-          horse.setAttribute('horse-mover', 'active: false; extraSpeed: 0');
-          horse.object3D.visible = false;
-          horse.object3D.position.set(0, 0.5, this.data.startZ);
-
-      if (!finishedWave) {
-            if (this.nextEventIdx >= this.events.length || this.replanCounter % 12 === 0) {
-              this.planEvents();
-            }
-            this.fillFromPlan();
-          } else if (!this.waveDoneTriggered) {
-            // Start 2s delay before next wave
-            this.waveDoneTriggered = true;
-            window.waveTransitioning = true;
-            console.log(`[Wave] Completed Wave ${window.currentWave}. Waiting 2s before next wave...`);
-            setTimeout(() => {
-              window.waveTransitioning = false;
-              this.waveDoneTriggered = false;
-              console.log('[Wave] Delay complete. Advancing wave.');
-              window.incrementWave();
-              
-        this.planEvents();
-        this.fillFromPlan();
-            }, 2000);
-          }
-        } catch (e) { console.error('recycleHorse error', e); }
-      }
-    });
-
-    AFRAME.registerComponent('lane-controller', {
-      init: function () {
-        this.lanes = [-2, 0, 2];
-        this.current = 1;
-        this.el.object3D.position.set(0, 1, 0);
-
-        this.cars = null;
-        this.lastCarsRefresh = 0;
-        document.addEventListener('keydown', (e) => {
-          try {
-            if (e.key === 'a' || e.key === 'A' || e.key === 'ArrowLeft') {
-              if (this.current > 0) {
-                this.current--;
-                this.el.object3D.position.x = this.lanes[this.current];
-              }
-            } else if (e.key === 'd' || e.key === 'D' || e.key === 'ArrowRight') {
-              if (this.current < this.lanes.length - 1) {
-                this.current++;
-                this.el.object3D.position.x = this.lanes[this.current];
-              }
-            }
-          } catch (e) {
-            console.error('Error in lane-controller keydown:', e);
-          }
-        });
-      },
-      tick: function () {
-        try {
-          const playerX = this.el.object3D.position.x;
-
-          const time = performance.now();
-          if (!this.cars || this.cars.length === 0 || (time - this.lastCarsRefresh) > 2000) {
-            this.cars = Array.from(document.querySelectorAll('.car'));
-            this.lastCarsRefresh = time;
-          }
-          for (let obs of this.cars) {
-            const pos = obs.object3D.position; 
-            if (Math.abs(pos.x - playerX) < 0.9 && Math.abs(pos.z) < 0.9) {
-
-              let laneIndex = this.lanes.indexOf(Math.round(pos.x));
-              let laneName = laneIndex === 0 ? 'left' : laneIndex === 1 ? 'center' : laneIndex === 2 ? 'right' : 'unknown';
-              console.log(`Horse touched the player in lane: ${laneName} (x=${pos.x})`);
-              this.current = 1;
-              this.el.object3D.position.set(this.lanes[this.current], 1, 0);
-            }
-          }
-        } catch (e) {
-          console.error('Error in lane-controller tick:', e);
-        }
-      }
-    });
-
-    // CUTSCENE - INTRO
-    AFRAME.registerComponent('intro-director', {
-      init: function () {
-        this.started = false;
-        this.leadHorse = null;
-        this.followers = [];
-        this.onLeadPassed = this.onLeadPassed.bind(this);
-        this.el.addEventListener('start-intro', () => this.start());
-      },
-      start: function () {
-        if (this.started) return;
-        this.started = true;
-        const introCam = document.querySelector('#introCam');
-        const playerCam = document.querySelector('#playerCam');
-        const mgrEl = document.querySelector('#horseManager');
-        const mgr = mgrEl && mgrEl.components && mgrEl.components['horse-manager'];
-        const gameRoot = document.querySelector('#game-entities');
-        if (mgrEl) mgrEl.setAttribute('visible', 'false');
-        if (playerCam) playerCam.removeAttribute('camera');
-        if (introCam) introCam.setAttribute('camera', 'active', true);
-  window.horsesPassed = 0;
-  window.currentWave = 1;
-  window.horseSpeed = 10;
-  window.horsesPassedInWave = 0;
-  window.horsesSpawnedInWave = 0;
-  window.waveTransitioning = false;
-  console.log(`[Intro] Start -> Wave ${window.currentWave}, quota=${waveQuota(window.currentWave)}, baseSpeed=${window.horseSpeed}`);
-        if (window.updateWaveLabel) window.updateWaveLabel();
-        if (window.updateHorsesLeftLabel) window.updateHorsesLeftLabel();
-        if (introCam) {
-          introCam.setAttribute('position', '0 1 -100');
-          introCam.setAttribute('animation__move', {
-            property: 'position',
-            from: '0 0.5 -100',
-            to: '0 4.5 1.5',
-            dur: 6000,
-            easing: 'easeInCubic'
-          });
-        }
-        setTimeout(() => {
-          this.spawnIntroHorses(gameRoot);
-          setTimeout(() => this.accelerateLead(), 2200);
-        }, 1000);
-      },
-      spawnIntroHorses: function (root) {
-        const makeHorse = (z, extra, isLead=false) => {
-          const h = document.createElement('a-entity');
-          h.classList.add('intro-horse');
-          h.setAttribute('gltf-model', 'assets/obstacles/Horse_Running.glb');
-          h.setAttribute('scale', '0.04 0.04 0.04');
-          h.setAttribute('position', `0 0.5 ${z}`);
-          h.setAttribute('animation-mixer', 'clip: *; timeScale: 1.8');
-          h.setAttribute('horse-mover', `active: true; extraSpeed: ${extra}`);
-          if (isLead) {
-            h.addEventListener('needs-respawn', this.onLeadPassed, { once: true });
-            this.leadHorse = h;
-          } else {
-            h.addEventListener('needs-respawn', () => h.remove());
-            this.followers.push(h);
-          }
-          root.appendChild(h);
-          return h;
-        };
-        makeHorse(-130, 15, true);
-        makeHorse(-140, 10);
-        makeHorse(-150, 10);
-        makeHorse(-165, 8);
-        makeHorse(-180, 8);
-      },
-      accelerateLead: function () {
-        if (!this.leadHorse) return;
-
-        this.leadHorse.setAttribute('horse-mover', 'active: true; extraSpeed: 60');
-
-        for (const f of this.followers) {
-          const comp = f.getAttribute('horse-mover');
-          const cur = comp && comp.extraSpeed ? comp.extraSpeed : 0;
-          f.setAttribute('horse-mover', `active: true; extraSpeed: ${cur + 8}`);
-        }
-      },
-      onLeadPassed: function () {
-        const introCam = document.querySelector('#introCam');
-        const playerCam = document.querySelector('#playerCam');
-        const mgrEl = document.querySelector('#horseManager');
-        const mgr = mgrEl && mgrEl.components && mgrEl.components['horse-manager'];
-
-        // if (this.leadHorse) this.leadHorse.remove();
-        // for (const f of this.followers) f.remove();
-        this.followers = [];
-
-        if (introCam) introCam.removeAttribute('camera');
-        if (playerCam) playerCam.setAttribute('camera', 'active', true);
-
-  window.horseSpeed = 30;
-        if (mgrEl) mgrEl.setAttribute('visible', 'true');
-        if (mgr) mgr.reset();
-      }
-    });
-
-  </script>
+  <script src="js/components/shell-mover.js"></script>
+  <script src="js/components/shell-manager.js"></script>
+  <script src="js/components/player-collision.js"></script>
+  <script src="js/components/game-reset.js"></script>
+  <script src="js/menu-listener.js"></script>
+  <script src="js/components/ground-loop.js"></script>
 </head>
 <body>
-  <a-scene stats renderer="antialias: false; precision: mediump; powerPreference: high-performance" fog="type: linear; color: #87CEEB; near: 0; far: 200">
+  <a-scene renderer="antialias: false; precision: low; powerPreference: high-performance" fog="type: linear; color: #87CEEB; near: 0; far: 200" menu-listener game-reset>
     <a-assets>
       <img id="sky" src="assets/map/fire_sky.jpg">
-      <a-asset-item id="map" src="assets/map/wall.glb"></a-asset-item>
+      <a-asset-item id="wall" src="assets/map/wall.glb"></a-asset-item>
       <a-asset-item id="titan_run" src="assets/titan/run.glb"></a-asset-item>
+      <a-asset-item id="cannon" src="assets/map/cannon/cannon.glb"></a-asset-item>
+      <a-asset-item id="ground" src="assets/map/ground.glb"></a-asset-item>
+  <img id="banner" src="assets/map/banner.png">
+      <img id="wall_image" src="assets/map/wall_image.png">
+  <a-asset-item id="shell" src="assets/map/cannon/shell.glb"></a-asset-item>
+  <a-asset-item id="aotFont" src="assets/fonts/aot_font.ttf"></a-asset-item>
       <audio id="bg-music" src="assets/song.mp3"></audio>
     </a-assets>
+  <a-entity id="bgMusic" geometry="primitive: plane" material="color: blue"
+          position="0 0 0" sound="src: assets/song.mp3; autoplay: true; volume: 1.2"></a-entity>
 
-    <a-sound src="#bg-music" autoplay="true" loop="true" volume="0.7"></a-sound>
-
+    <a-sky id="#sky"></a-sky>
     <a-entity id="vr-menu">
-      <a-camera id="menuCam" position="0 1.6 0" raycaster="far: 100" camera>
+      <a-camera id="menuCam" position="0 2 -1" raycaster="far: 100" camera>
         <a-cursor fuse="true" fuse-timeout="500" color="white"></a-cursor>
       </a-camera>
-      <a-plane position="0 1.6 -3" width="2" height="1.2" color="#222" opacity="0.9"></a-plane>
-      <a-text value="Koko" position="0 2.1 -2.99" align="center" color="#FFF" width="2"></a-text>
-      <a-box id="startBtn" position="0 1.4 -2.99" depth="0.1" height="0.3" width="1" color="#4CAF50"></a-box>
-      <a-text value="START" position="0 1.4 -2.89" align="center" color="#fff" width="1"></a-text>
-    </a-entity>
+  <a-image src="#banner" position="0 1.6 -3" width="4" height="1.5" visible="true"></a-image>
+    <a-entity troika-text="value: move cursor/look around to start by holding left click; font: #aotFont; fontSize: 0.18; color: #fff; anchor: center" position="0 3 -2.89"> </a-entity>
+      <a-entity troika-text="value: subway surfer-inspired game > use wasd to change across 3 lanes; font: #aotFont; fontSize: 0.15; color: #fff; anchor: center" position="0 2.8 -2.89"> </a-entity>
 
-    <a-entity id="game-entities" visible="false">
-      <a-sky src="#sky"></a-sky>
-      <a-entity id="mapEntity" gltf-model="#map" position="0 0 -100" scale="1 1 1"></a-entity>
+      <a-box position="0 2.9 -2.99" depth="0.1" height="0.6" width="3"></a-box>   
+    <a-box id="startBtn" position="0 2.2 -2.99" depth="0.1" height="0.3" width="1"></a-box>
+  <a-entity id="startLabel" troika-text="value: start; font: #aotFont; fontSize: 0.1; color: #fff; anchor: center" position="0 2.2 -2.89"></a-entity>
+</a-entity>
 
-      <a-plane position="0 5 -7.99" width="3" height="0.5" color="#c1121f" opacity="0.9"></a-plane>
-      <a-text id="waveLabel" value="Wave 1" position="0 4.94 -7.89" align="center" color="#fff" width="4" height="2"></a-text>
+  <a-entity id="game-entities" visible="false" ground-loop="count:3; speed:15; segmentLength:30">
+  <a-entity id="wallEntity" gltf-model="#wall" position="0 0 -100" scale="1 1 1"></a-entity>
+    <a-entity id="groundEntity" gltf-model="#ground" position="5 0 -20" scale="3 3 3"></a-entity>
+  <a-entity id="horseManager" horse-manager="startZ: -120; poolSize: 5; planCount: 16; maxActive: 5; zJitter: 15; minGapZ: 35"></a-entity>
 
-      <a-plane id="horsesLeftBg" position="0 4.55 -7.99" width="3" height="0.4" color="#1b263b" opacity="0.9"></a-plane>
-      <a-text id="horsesLeftLabel" value="5 to next wave" position="0 4.5 -7.89" align="center" color="#fff" width="4"></a-text>
-
-      <a-entity id="road1" position="0 0 -50">
-        <a-box position="0 0 0" width="6" height="0.5" depth="100" material="shader: flat; color: #404040"></a-box>
-        <a-box position="-1 0.01 0" scale="0.2 0.02 100" material="shader: flat; color: #FFFF00"></a-box>
-        <a-box position="1 0.01 0" scale="0.2 0.02 100" material="shader: flat; color: #FFFF00"></a-box>
-        <a-box position="-3.25 1 0" scale="0.5 2 100" material="shader: flat; color: #808080"></a-box>
-        <a-box position="3.25 1 0" scale="0.5 2 100" material="shader: flat; color: #808080"></a-box>
-      </a-entity>
-      <a-entity id="road2" position="0 0 -150">
-        <a-box position="0 0 0" width="6" height="0.5" depth="100" material="shader: flat; color: #404040"></a-box>
-        <a-box position="-1 0.01 0" scale="0.2 0.02 100" material="shader: flat; color: #FFFF00"></a-box>
-        <a-box position="1 0.01 0" scale="0.2 0.02 100" material="shader: flat; color: #FFFF00"></a-box>
-        <a-box position="-3.25 1 0" scale="0.5 2 100" material="shader: flat; color: #808080"></a-box>
-        <a-box position="3.25 1 0" scale="0.5 2 100" material="shader: flat; color: #808080"></a-box>
-      </a-entity>
-
-      <a-entity id="horseManager" horse-manager="startZ: -120; poolSize: 3; planCount: 12; maxActive: 3; zJitter: 20; minGapZ: 50"></a-entity>
-
-    <a-entity id="player" lane-controller gltf-model="#titan_run" animation-mixer scale="0.5 0.5 0.5">
-        <a-camera id="playerCam" position="0 4.5 1.5" wasd-controls-enabled="true" look-controls-enabled="false"></a-camera>
+  <a-entity id="player" lane-controller player-collision gltf-model="#titan_run" animation-mixer scale="0.5 0.5 0.5">
+        <a-camera id="playerCam" position="0 4.5 1.5" wasd-controls-enabled="false" look-controls-enabled="true">
+          <a-plane id="horsesLeftBg" position="0 0.80 -1.5" width="0.9" height="0.18" color="#1b263b" opacity="0.95"></a-plane>
+          <a-entity id="horsesLeftLabel" troika-text="value: 5 to next wave; font: #aotFont; fontSize: 0.12; color: #fff; anchor: center" position="0 0.78 -1.49"></a-entity>
+          <a-plane id="waveBg" position="0 0.96 -1.5" width="0.9" height="0.2" color="#c1121f" opacity="0.9"></a-plane>
+          <a-entity id="waveLabel" troika-text="value: Wave 1; font: #aotFont; fontSize: 0.14; color: #fff; anchor: center" position="0 0.94 -1.49"></a-entity>
+        </a-camera>
       </a-entity>
 
       <a-entity id="introCam" position="0 0 -100"></a-entity>
-
-      <a-entity id="introDirector" intro-director></a-entity>
+      
+  <a-entity id="introDirector" intro-director></a-entity>
+  <a-entity id="finaleManager" finale-director></a-entity>
 
       <a-light type="ambient" color="#FFFFFF" intensity="0.3"></a-light>
       <a-light type="directional" color="#FFFFFF" intensity="2" position="0 10 -5" decay="2" distance="50"></a-light>
@@ -557,44 +77,59 @@
         <a-light type="point" color="#FFFFFF" intensity="3" distance="50"></a-light>
       </a-entity>
     </a-entity>
+  </a-scene>
+  <script>
 
-    <script>
-      AFRAME.registerComponent('menu-listener', {
-        init: function () {
-          var startBtn = document.querySelector('#startBtn');
-          var menuCam = document.querySelector('#menuCam');
-          var playerCam = document.querySelector('#playerCam');
-          var vrMenu = document.querySelector('#vr-menu');
-          var gameEntities = document.querySelector('#game-entities');
+    (function(){
+      function fixHUD() {
+        try {
+          const ids = ['horsesLeftBg','waveBg','horsesLeftLabel','waveLabel'];
+          ids.forEach(id => {
+            const el = document.querySelector('#' + id);
+            if (!el) return;
 
-          menuCam.setAttribute('camera', 'active', true);
-          playerCam.removeAttribute('camera');
-          startBtn.addEventListener('click', function () {
-            vrMenu.setAttribute('visible', 'false');
-            gameEntities.setAttribute('visible', 'true');
+            const meshes = [];
+            const mesh = el.getObject3D && el.getObject3D('mesh');
+            if (mesh) meshes.push(mesh);
 
-            menuCam.removeAttribute('camera');
-
-            const mgrEl = document.querySelector('#horseManager');
-            if (mgrEl) mgrEl.setAttribute('visible', 'false');
-            window.horsesPassed = 0;
-            window.currentWave = 1;
-            window.horseSpeed = 10;
-            window.horsesPassedInWave = 0;
-            window.horsesSpawnedInWave = 0;
-            window.waveTransitioning = false;
-            console.log(`[Menu] Start -> Wave ${window.currentWave}, quota=${waveQuota(window.currentWave)}, baseSpeed=${window.horseSpeed}`);
-            const waveLabel = document.querySelector('#waveLabel');
-            if (waveLabel) waveLabel.setAttribute('value', 'Wave 1');
-            if (window.updateHorsesLeftLabel) window.updateHorsesLeftLabel();
-            const introDirector = document.querySelector('#introDirector');
-            if (introDirector) introDirector.emit('start-intro');
+            if (el.object3D && el.object3D.children && el.object3D.children.length) {
+              el.object3D.traverse((c) => { if (c.isMesh) meshes.push(c); });
+            }
+            meshes.forEach(m => {
+              try { m.renderOrder = 9999; if (m.material) { m.material.depthTest = false; m.material.depthWrite = false; m.material.transparent = true; } } catch(_){}
+            });
+          });
+        } catch (_) {}
+      }
+      if (document.readyState === 'complete') setTimeout(fixHUD, 50); else window.addEventListener('load', function(){ setTimeout(fixHUD, 50); });
+    })();
+  </script>
+  <script>
+    window.addEventListener('load', () => {
+      try {
+        const skyImg = document.getElementById('sky');
+        const aSky = document.querySelector('a-sky');
+        const scene = document.querySelector('a-scene');
+        if (aSky) {
+          aSky.setAttribute('src', '#sky');
+          aSky.setAttribute('visible', 'true');
+          aSky.addEventListener('materialtextureloaded', () => {
+            console.log('[diagnostic] a-sky materialtextureloaded');
+            try {
+              const mesh = aSky.getObject3D && aSky.getObject3D('mesh');
+              if (mesh && mesh.material) {
+                console.log('[diagnostic] before: material.fog=', mesh.material.fog, 'opacity=', mesh.material.opacity);
+                mesh.material.fog = false;
+                mesh.material.needsUpdate = true;
+                console.log('[diagnostic] after: material.fog=', mesh.material.fog);
+              }
+            } catch (e) { console.warn('[diagnostic] could not modify sky material', e); }
           });
         }
-      });
-      document.querySelector('a-scene').setAttribute('menu-listener', '');
-
-    </script>
-  </a-scene>
+      } catch (e) {
+        console.warn('[diagnostic] error in window load event:', e);
+      }
+    });
+  </script>
 </body>
 </html>
